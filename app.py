@@ -24,20 +24,38 @@ if st.session_state.get("logout_triggered"):
         st.rerun()
     st.stop()
 
-# --- Google Sheets 上傳函式 (Coach 專用版) ---
+# --- Google Sheets 上傳函式 (自動修復版) ---
 def save_to_google_sheets(user_id, chat_history, grade, lang):
     try:
-        # 1. 連線與設定
+        # 1. 檢查 Secrets 是否存在
+        if "gcp_service_account" not in st.secrets:
+            st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。請確認您已在 Streamlit 後台設定 Secrets。")
+            return False
+
+        # 2. 連線設定
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        sheet = client.open("2025創傷知情研習數據")
-        # ⚠️ 注意：資料會寫入 'Coach' 分頁，請確認試算表已有此分頁
-        worksheet = sheet.worksheet("Coach")
+        # 3. 開啟試算表
+        try:
+            sheet = client.open("2025創傷知情研習數據")
+        except gspread.SpreadsheetNotFound:
+            st.error("❌ 錯誤：找不到名為「2025創傷知情研習數據」的 Google 試算表。請確認名稱是否正確。")
+            return False
+
+        # 4. 取得或自動建立 'Coach' 分頁
+        try:
+            worksheet = sheet.worksheet("Coach")
+        except gspread.WorksheetNotFound:
+            # 如果找不到 Coach 分頁，就自動建立一個！
+            worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
+            # 幫忙加上標題列
+            worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
+            st.toast("💡 系統已自動為您建立 'Coach' 分頁")
         
-        # 2. 時間計算 (校正為台灣時間 UTC+8)
+        # 5. 時間計算 (校正為台灣時間 UTC+8)
         tw_fix = timedelta(hours=8)
         
         # A. 取得登入時間
@@ -51,17 +69,15 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
         # C. 計算使用分鐘數
         duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
         
-        # D. 計算累積次數 (讀取 C 欄「學員編號」)
+        # D. 計算累積次數
         try:
             all_ids = worksheet.col_values(3) 
             login_count = all_ids.count(user_id) + 1
         except:
             login_count = 1
 
-        # 3. 整理對話內容
-        # 記錄「諮詢年級」與「語言」作為情境參數
+        # 6. 整理對話內容
         context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
-        
         full_conversation = f"【設定參數】：{context_info}\n\n"
         for msg in chat_history:
             role = msg.get("role", "Unknown")
@@ -72,7 +88,7 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
                 content = msg["content"]
             full_conversation += f"[{role}]: {content}\n"
 
-        # 4. 寫入六大欄位
+        # 7. 寫入資料
         worksheet.append_row([
             login_str, 
             logout_str, 
@@ -82,8 +98,9 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
             full_conversation
         ])
         return True
+
     except Exception as e:
-        st.error(f"上傳失敗: {e}")
+        st.error(f"❌ 上傳發生未預期的錯誤: {e}")
         return False
 
 # 初始化 Session State
@@ -121,15 +138,15 @@ if st.sidebar.button("上傳紀錄並登出"):
         st.sidebar.warning("還沒有對話紀錄喔！")
     else:
         with st.spinner("正在上傳數據至雲端..."):
-            # 讀取當前設定的年級與語言
             current_grade = st.session_state.get("current_grade", "未設定")
             current_lang = st.session_state.get("current_lang", "未設定")
             
+            # 只有當 save_to_google_sheets 回傳 True (成功) 時，才執行登出
             if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history, current_grade, current_lang):
                 st.sidebar.success("✅ 上傳成功！")
                 time.sleep(1) 
 
-                # 清除資料 (保留必要參數，清除個資)
+                # 清除資料
                 keys_to_clear = ["user_nickname", "history", "start_time", "chat_session"]
                 for key in keys_to_clear:
                     if key in st.session_state:
@@ -138,6 +155,9 @@ if st.sidebar.button("上傳紀錄並登出"):
                 # 設定登出記號
                 st.session_state.logout_triggered = True
                 st.rerun()
+            else:
+                # 如果上傳失敗，這裡會顯示上面的 st.error，並且不會登出
+                pass
 
 # API Key 與設定
 st.sidebar.markdown("---")
@@ -159,11 +179,11 @@ if api_key:
     except: 
         st.sidebar.error("❌ API Key 無效")
 
-# 選項設定 (保留 Coach 的核心功能)
+# 選項設定
 student_grade = st.sidebar.selectbox("🎯 諮詢對象年級", ["國小", "國中", "高中"])
 lang = st.sidebar.selectbox("🌐 選擇對話語言", ["繁體中文", "粵語", "English"])
 
-# 將當前設定存入 session 方便上傳時讀取
+# 將當前設定存入 session
 st.session_state.current_grade = student_grade
 st.session_state.current_lang = lang
 
@@ -186,7 +206,7 @@ if not st.session_state.loaded_text:
     else:
         st.warning("⚠️ 倉庫中找不到 PDF 檔案。")
 
-# --- 5. 教練對話邏輯 (Coach Brain) ---
+# --- 5. 教練對話邏輯 ---
 st.title("💬 實作策略諮詢區")
 
 if st.session_state.loaded_text and api_key and valid_model_name:
@@ -199,25 +219,19 @@ if st.session_state.loaded_text and api_key and valid_model_name:
         }
     )
 
-    # 初始歡迎訊息 (Coach 特有的開場)
     if len(st.session_state.history) == 0:
         sys_prompt = f"""
         Role: You are a "Trauma-Informed Implementation Coach" for teachers.
         Current Context: Working with {student_grade} students.
         Language: {lang}.
-        
         Knowledge Base: {st.session_state.loaded_text[:30000]} 
-        
         Guidelines:
         1. Empathize with the teacher first.
-        2. Use Socratic questioning to help the teacher identify the student's behavior as a trauma response (4F: Fight, Flight, Freeze, Fawn).
-        3. Differentiate advice by grade:
-           - For 國小: Focus on sensory regulation and safety routines.
-           - For 國中/高中: Focus on autonomy, respect, and collaborative problem-solving.
-        4. Refer to 'Strength-Based' and 'Connect before Correct' principles from the texts.
+        2. Use Socratic questioning to help the teacher identify the student's behavior as a trauma response (4F).
+        3. Differentiate advice by grade.
+        4. Refer to 'Strength-Based' and 'Connect before Correct' principles.
         """
         
-        # 開場白
         welcome_msg = f"你好 {st.session_state.user_nickname} 老師，很高興能擔任您的 AI 實作教練。目前針對 {student_grade} 班級的教學現場，有沒有什麼讓你感到挫折或困難的具體個案，我們一起來討論看看？"
         
         st.session_state.chat_session = model.start_chat(history=[
@@ -226,13 +240,11 @@ if st.session_state.loaded_text and api_key and valid_model_name:
         ])
         st.session_state.history.append({"role": "assistant", "content": welcome_msg})
 
-    # 顯示對話紀錄
     for msg in st.session_state.history:
         role = "assistant" if msg["role"] == "assistant" else "user"
         with st.chat_message(role):
             st.write(msg["content"])
 
-    # 使用者輸入區
     if user_in := st.chat_input("描述您的挑戰（例如：學生突然大叫、拒絕合作...）"):
         st.session_state.history.append({"role": "user", "content": user_in})
         try:
