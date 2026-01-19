@@ -42,7 +42,7 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
         client = gspread.authorize(creds)
         
         # 3. 開啟試算表 (確保檔名正確)
-        target_sheet_name = "2025創傷知情研究數據" 
+        target_sheet_name = "2025創傷知情研習數據" 
         try:
             sheet = client.open(target_sheet_name)
         except gspread.SpreadsheetNotFound:
