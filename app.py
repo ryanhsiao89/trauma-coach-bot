@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="創傷知情 AI 實作教練 (研究版)", layout="wide")
+st.set_page_config(page_title="創傷知情 AI 實作教練 (Mollick版)", layout="wide")
 
 # --- 0. 檢查是否剛登出 (放在最前面攔截) ---
 if st.session_state.get("logout_triggered"):
@@ -24,59 +24,54 @@ if st.session_state.get("logout_triggered"):
         st.rerun()
     st.stop()
 
-# --- Google Sheets 上傳函式 (自動修復版) ---
+# --- Google Sheets 上傳函式 (終極修復版) ---
 def save_to_google_sheets(user_id, chat_history, grade, lang):
     try:
         # 1. 檢查 Secrets 是否存在
         if "gcp_service_account" not in st.secrets:
-            st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。請確認您已在 Streamlit 後台設定 Secrets。")
+            st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。")
             return False
 
-        # 2. 連線設定
+        # 2. 連線設定 (包含金鑰格式修復)
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = st.secrets["gcp_service_account"]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        # 3. 開啟試算表
+        # 3. 開啟試算表 (確保檔名正確)
+        target_sheet_name = "2025創傷知情研究數據" 
         try:
-            sheet = client.open("2025創傷知情研習數據")
+            sheet = client.open(target_sheet_name)
         except gspread.SpreadsheetNotFound:
-            st.error("❌ 錯誤：找不到名為「2025創傷知情研習數據」的 Google 試算表。請確認名稱是否正確。")
+            st.error(f"❌ 錯誤：找不到名為「{target_sheet_name}」的試算表。請確認 Google Drive 上的檔名完全一致。")
             return False
 
         # 4. 取得或自動建立 'Coach' 分頁
         try:
             worksheet = sheet.worksheet("Coach")
         except gspread.WorksheetNotFound:
-            # 如果找不到 Coach 分頁，就自動建立一個！
             worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
-            # 幫忙加上標題列
             worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
-            st.toast("💡 系統已自動為您建立 'Coach' 分頁")
         
         # 5. 時間計算 (校正為台灣時間 UTC+8)
         tw_fix = timedelta(hours=8)
-        
-        # A. 取得登入時間
         start_t = st.session_state.get('start_time', datetime.now())
         login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # B. 取得登出時間
         end_t = datetime.now()
         logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # C. 計算使用分鐘數
         duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
         
-        # D. 計算累積次數
+        # 6. 計算累積次數
         try:
             all_ids = worksheet.col_values(3) 
             login_count = all_ids.count(user_id) + 1
         except:
             login_count = 1
 
-        # 6. 整理對話內容
+        # 7. 整理對話內容
         context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
         full_conversation = f"【設定參數】：{context_info}\n\n"
         for msg in chat_history:
@@ -88,7 +83,7 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
                 content = msg["content"]
             full_conversation += f"[{role}]: {content}\n"
 
-        # 7. 寫入資料
+        # 8. 寫入資料
         worksheet.append_row([
             login_str, 
             logout_str, 
@@ -100,7 +95,7 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
         return True
 
     except Exception as e:
-        st.error(f"❌ 上傳發生未預期的錯誤: {e}")
+        st.error(f"❌ 上傳發生錯誤: {str(e)}") 
         return False
 
 # 初始化 Session State
@@ -109,19 +104,17 @@ if "loaded_text" not in st.session_state: st.session_state.loaded_text = ""
 if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
 
-# --- 2. 登入區 (改為編號制) ---
+# --- 2. 登入區 ---
 if not st.session_state.user_nickname:
     st.title("🧠 創傷知情 AI 實作教練")
     st.info("請輸入您的研究編號 (ID) 以開始諮詢。")
     
-    # 1. 建立輸入框
     nickname_input = st.text_input("請輸入您的編號：", placeholder="例如：001, 002...") 
     
-    # 2. 建立登入按鈕
     if st.button("🚀 進入教練室"):
         if nickname_input.strip():
             st.session_state.user_nickname = nickname_input
-            st.session_state.start_time = datetime.now() # 記錄開始時間
+            st.session_state.start_time = datetime.now()
             st.rerun()
         else:
             st.error("❌ 編號不能為空！")
@@ -132,32 +125,31 @@ st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📤 結束諮詢")
 
-# 上傳並登出按鈕
 if st.sidebar.button("上傳紀錄並登出"):
     if not st.session_state.history:
         st.sidebar.warning("還沒有對話紀錄喔！")
     else:
-        with st.spinner("正在上傳數據至雲端..."):
+        with st.spinner("正在連線至 Google 試算表..."):
             current_grade = st.session_state.get("current_grade", "未設定")
             current_lang = st.session_state.get("current_lang", "未設定")
             
-            # 只有當 save_to_google_sheets 回傳 True (成功) 時，才執行登出
-            if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history, current_grade, current_lang):
+            upload_success = save_to_google_sheets(st.session_state.user_nickname, st.session_state.history, current_grade, current_lang)
+            
+            if upload_success:
                 st.sidebar.success("✅ 上傳成功！")
                 time.sleep(1) 
-
-                # 清除資料
                 keys_to_clear = ["user_nickname", "history", "start_time", "chat_session"]
                 for key in keys_to_clear:
                     if key in st.session_state:
                         del st.session_state[key]
-                
-                # 設定登出記號
                 st.session_state.logout_triggered = True
                 st.rerun()
             else:
-                # 如果上傳失敗，這裡會顯示上面的 st.error，並且不會登出
-                pass
+                st.sidebar.error("⚠️ 上傳失敗，請檢查上方錯誤訊息。")
+                if st.sidebar.button("⚠️ 忽略錯誤，強制登出"):
+                    st.session_state.logout_triggered = True
+                    st.session_state.clear()
+                    st.rerun()
 
 # API Key 與設定
 st.sidebar.markdown("---")
@@ -182,8 +174,6 @@ if api_key:
 # 選項設定
 student_grade = st.sidebar.selectbox("🎯 諮詢對象年級", ["國小", "國中", "高中"])
 lang = st.sidebar.selectbox("🌐 選擇對話語言", ["繁體中文", "粵語", "English"])
-
-# 將當前設定存入 session
 st.session_state.current_grade = student_grade
 st.session_state.current_lang = lang
 
@@ -191,7 +181,6 @@ st.session_state.current_lang = lang
 if not st.session_state.loaded_text:
     combined_text = ""
     pdf_files = glob.glob("*.pdf")
-    
     if pdf_files:
         with st.spinner(f"📚 正在內化 {len(pdf_files)} 份專業教材..."):
             try:
@@ -206,7 +195,7 @@ if not st.session_state.loaded_text:
     else:
         st.warning("⚠️ 倉庫中找不到 PDF 檔案。")
 
-# --- 5. 教練對話邏輯 ---
+# --- 5. 教練對話邏輯 (Mollick Coach Prompt) ---
 st.title("💬 實作策略諮詢區")
 
 if st.session_state.loaded_text and api_key and valid_model_name:
@@ -220,19 +209,29 @@ if st.session_state.loaded_text and api_key and valid_model_name:
     )
 
     if len(st.session_state.history) == 0:
+        # 核心：Mollick 教練模式 Prompt
         sys_prompt = f"""
-        Role: You are a "Trauma-Informed Implementation Coach" for teachers.
-        Current Context: Working with {student_grade} students.
+        Role: You are a "Trauma-Informed Implementation Coach" (Mollick's Coach Persona).
+        Target Audience: A teacher working with {student_grade} students.
         Language: {lang}.
-        Knowledge Base: {st.session_state.loaded_text[:30000]} 
-        Guidelines:
-        1. Empathize with the teacher first.
-        2. Use Socratic questioning to help the teacher identify the student's behavior as a trauma response (4F).
-        3. Differentiate advice by grade.
-        4. Refer to 'Strength-Based' and 'Connect before Correct' principles.
+        
+        Knowledge Base (Context Only): {st.session_state.loaded_text[:30000]}
+        
+        ### CRITICAL INSTRUCTIONS (MUST FOLLOW):
+        1. **NO DIRECT ANSWERS:** Do NOT give solutions, advice, or lecture the teacher. Do NOT summarize the PDF text.
+        2. **Reflective Partner:** Your goal is to help the teacher find their own strength and solutions.
+        3. **Socratic Questioning:** Always respond with a validating statement followed by ONE or TWO open-ended questions.
+        4. **Metacognition:** Ask questions like "What do you think is driving this behavior?", "What have you tried that worked before?", or "How does this make you feel?".
+        5. **Use Theory as a Map:** Use the knowledge base (Trauma-Informed Care, 4F response) only to *frame* your questions, never to *teach* the content.
+        
+        ### Example Interaction:
+        User: "The student keeps screaming at me."
+        Coach (You): "That sounds incredibly draining. It must be hard to stay calm when that happens. When he screams, what emotion do you think he is actually trying to express underneath the anger?" (Do NOT say: "You should do X.")
+        
+        Start the conversation by welcoming the teacher and asking what specific challenge they are facing today.
         """
         
-        welcome_msg = f"你好 {st.session_state.user_nickname} 老師，很高興能擔任您的 AI 實作教練。目前針對 {student_grade} 班級的教學現場，有沒有什麼讓你感到挫折或困難的具體個案，我們一起來討論看看？"
+        welcome_msg = f"你好 {st.session_state.user_nickname} 老師，我是您的 AI 實作教練。我不會直接給您標準答案，但我會陪著您一起整理思緒，找出適合您班級的策略。\n\n目前在 {student_grade} 現場，有沒有哪位學生的狀況最近讓您感到比較卡關？"
         
         st.session_state.chat_session = model.start_chat(history=[
             {"role": "user", "parts": [sys_prompt]},
