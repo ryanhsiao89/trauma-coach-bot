@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="創傷知情 AI 實作教練 (Mollick版)", layout="wide")
+st.set_page_config(page_title="創傷知情 AI 實作教練 (研究版)", layout="wide")
 
 # --- 0. 檢查是否剛登出 (放在最前面攔截) ---
 if st.session_state.get("logout_triggered"):
@@ -42,7 +42,7 @@ def save_to_google_sheets(user_id, chat_history, grade, lang):
         client = gspread.authorize(creds)
         
         # 3. 開啟試算表 (確保檔名正確)
-        target_sheet_name = "2025創傷知情研習數據" 
+        target_sheet_name = "2025創傷知情研究數據" 
         try:
             sheet = client.open(target_sheet_name)
         except gspread.SpreadsheetNotFound:
@@ -122,9 +122,33 @@ if not st.session_state.user_nickname:
 
 # --- 3. 側邊欄設定 ---
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
+
+# --- 新增功能：下載個人紀錄區 (放在上傳按鈕之前) ---
+st.sidebar.markdown("---")
+if st.session_state.history:
+    st.sidebar.subheader("💾 個人備份")
+    # 準備下載用的資料表
+    df = pd.DataFrame(st.session_state.history)
+    df['nickname'] = st.session_state.user_nickname
+    df['grade'] = st.session_state.get("current_grade", "N/A")
+    df['lang'] = st.session_state.get("current_lang", "N/A")
+    df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 轉成 CSV (使用 utf-8-sig 避免 Excel 亂碼)
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    
+    st.sidebar.download_button(
+        label="📥 下載對話紀錄 (CSV)",
+        data=csv,
+        file_name=f"Coach紀錄_{st.session_state.user_nickname}.csv",
+        mime="text/csv",
+        help="點擊下載這份對話紀錄到您的電腦中保存"
+    )
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📤 結束諮詢")
 
+# 上傳並登出按鈕
 if st.sidebar.button("上傳紀錄並登出"):
     if not st.session_state.history:
         st.sidebar.warning("還沒有對話紀錄喔！")
@@ -223,10 +247,6 @@ if st.session_state.loaded_text and api_key and valid_model_name:
         3. **Socratic Questioning:** Always respond with a validating statement followed by ONE or TWO open-ended questions.
         4. **Metacognition:** Ask questions like "What do you think is driving this behavior?", "What have you tried that worked before?", or "How does this make you feel?".
         5. **Use Theory as a Map:** Use the knowledge base (Trauma-Informed Care, 4F response) only to *frame* your questions, never to *teach* the content.
-        
-        ### Example Interaction:
-        User: "The student keeps screaming at me."
-        Coach (You): "That sounds incredibly draining. It must be hard to stay calm when that happens. When he screams, what emotion do you think he is actually trying to express underneath the anger?" (Do NOT say: "You should do X.")
         
         Start the conversation by welcoming the teacher and asking what specific challenge they are facing today.
         """
