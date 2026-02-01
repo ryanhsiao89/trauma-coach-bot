@@ -24,79 +24,96 @@ if st.session_state.get("logout_triggered"):
         st.rerun()
     st.stop()
 
-# --- Google Sheets 上傳函式 (終極修復版) ---
+# --- Google Sheets 上傳函式 (含自動重試機制) ---
 def save_to_google_sheets(user_id, chat_history, grade, lang):
-    try:
-        # 1. 檢查 Secrets 是否存在
-        if "gcp_service_account" not in st.secrets:
-            st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。")
-            return False
+    # 設定重試參數
+    max_retries = 3  # 最大重試次數
+    delay = 2        # 初始等待秒數 (2秒 -> 4秒 -> 8秒)
 
-        # 2. 連線設定 (包含金鑰格式修復)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        
-        # 3. 開啟試算表 (確保檔名正確)
-        target_sheet_name = "2025創傷知情研習數據" 
+    for attempt in range(max_retries):
         try:
-            sheet = client.open(target_sheet_name)
-        except gspread.SpreadsheetNotFound:
-            st.error(f"❌ 錯誤：找不到名為「{target_sheet_name}」的試算表。請確認 Google Drive 上的檔名完全一致。")
-            return False
+            # 1. 檢查 Secrets 是否存在
+            if "gcp_service_account" not in st.secrets:
+                st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。")
+                return False
 
-        # 4. 取得或自動建立 'Coach' 分頁
-        try:
-            worksheet = sheet.worksheet("Coach")
-        except gspread.WorksheetNotFound:
-            worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
-            worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
-        
-        # 5. 時間計算 (校正為台灣時間 UTC+8)
-        tw_fix = timedelta(hours=8)
-        start_t = st.session_state.get('start_time', datetime.now())
-        login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        end_t = datetime.now()
-        logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
-        
-        # 6. 計算累積次數
-        try:
-            all_ids = worksheet.col_values(3) 
-            login_count = all_ids.count(user_id) + 1
-        except:
-            login_count = 1
+            # 2. 連線設定 (包含金鑰格式修復)
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # 修正 private_key 的換行符號問題
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-        # 7. 整理對話內容
-        context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
-        full_conversation = f"【設定參數】：{context_info}\n\n"
-        for msg in chat_history:
-            role = msg.get("role", "Unknown")
-            content = ""
-            if "parts" in msg:
-                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
-            elif "content" in msg:
-                content = msg["content"]
-            full_conversation += f"[{role}]: {content}\n"
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            client = gspread.authorize(creds)
+            
+            # 3. 開啟試算表
+            # 請務必確認這裡的檔名與 Google Drive 上的一模一樣 (研習 vs 研究)
+            target_sheet_name = "2025創傷知情研習數據" 
+            try:
+                sheet = client.open(target_sheet_name)
+            except gspread.SpreadsheetNotFound:
+                st.error(f"❌ 錯誤：找不到名為「{target_sheet_name}」的試算表。請確認 Google Drive 上的檔名完全一致。")
+                return False
 
-        # 8. 寫入資料
-        worksheet.append_row([
-            login_str, 
-            logout_str, 
-            user_id, 
-            duration_mins, 
-            login_count, 
-            full_conversation
-        ])
-        return True
+            # 4. 取得或自動建立 'Coach' 分頁
+            try:
+                worksheet = sheet.worksheet("Coach")
+            except gspread.WorksheetNotFound:
+                worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
+                worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
+            
+            # 5. 時間計算 (校正為台灣時間 UTC+8)
+            tw_fix = timedelta(hours=8)
+            start_t = st.session_state.get('start_time', datetime.now())
+            login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+            end_t = datetime.now()
+            logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+            duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
+            
+            # 6. 計算累積次數
+            try:
+                all_ids = worksheet.col_values(3) 
+                login_count = all_ids.count(user_id) + 1
+            except:
+                login_count = 1
 
-    except Exception as e:
-        st.error(f"❌ 上傳發生錯誤: {str(e)}") 
-        return False
+            # 7. 整理對話內容
+            context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
+            full_conversation = f"【設定參數】：{context_info}\n\n"
+            for msg in chat_history:
+                role = msg.get("role", "Unknown")
+                content = ""
+                if "parts" in msg:
+                    content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+                elif "content" in msg:
+                    content = msg["content"]
+                full_conversation += f"[{role}]: {content}\n"
+
+            # 8. 寫入資料
+            worksheet.append_row([
+                login_str, 
+                logout_str, 
+                user_id, 
+                duration_mins, 
+                login_count, 
+                full_conversation
+            ])
+            
+            # 如果成功執行到這裡，回傳 True
+            return True
+
+        except Exception as e:
+            # 如果發生錯誤 (例如 API 塞車)
+            if attempt < max_retries - 1:
+                time.sleep(delay) # 等待
+                delay *= 2        # 等待時間加倍，避開尖峰
+                continue          # 重試
+            else:
+                # 如果重試了 3 次還是失敗
+                st.error(f"❌ 上傳失敗 (已重試{max_retries}次)，請檢查網路或稍後再試。\n錯誤訊息: {str(e)}")
+                return False
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
