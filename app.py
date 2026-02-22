@@ -146,7 +146,7 @@ if st.session_state.history:
     df['nickname'] = st.session_state.user_nickname
     df['grade'] = st.session_state.get("current_grade", "N/A")
     df['lang'] = st.session_state.get("current_lang", "N/A")
-    df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df['time'] = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     
     # 轉成 CSV (使用 utf-8-sig 避免 Excel 亂碼)
     csv = df.to_csv(index=False).encode('utf-8-sig')
