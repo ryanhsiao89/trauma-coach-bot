@@ -13,113 +13,109 @@ import time
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情 AI 實作教練 (研究版)", layout="wide")
 
-# --- 0. 檢查是否剛登出 (放在最前面攔截) ---
-if st.session_state.get("logout_triggered"):
-    st.markdown("## ✅ 已成功登出")
-    st.success("您的諮詢紀錄已安全上傳至雲端。感謝您的參與！")
-    st.write("如果您需要再次諮詢，請點擊下方按鈕。")
-    
-    if st.button("🔄 重新登入"):
-        st.session_state.logout_triggered = False
-        st.rerun()
-    st.stop()
-
-# --- Google Sheets 上傳函式 (含自動重試機制) ---
-def save_to_google_sheets(user_id, chat_history, grade, lang):
-    # 設定重試參數
-    max_retries = 3  # 最大重試次數
-    delay = 2        # 初始等待秒數 (2秒 -> 4秒 -> 8秒)
-
-    for attempt in range(max_retries):
+# --- Google Sheets 背景自動上傳函式 (Auto-Save 版) ---
+def auto_save_to_google_sheets(user_id, chat_history, grade, lang):
+    """每次對話更新時，自動在背景覆寫/更新該次對話紀錄"""
+    if not chat_history:
+        return False
+        
+    try:
+        # 1. 連線與設定
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # 2. 開啟試算表
+        target_sheet_name = "2025創傷知情研習數據" 
+        sheet = client.open(target_sheet_name)
+        
+        # 取得或自動建立 'Coach' 分頁
         try:
-            # 1. 檢查 Secrets 是否存在
-            if "gcp_service_account" not in st.secrets:
-                st.error("❌ 錯誤：找不到 Google Cloud 金鑰 (Secrets)。")
-                return False
+            worksheet = sheet.worksheet("Coach")
+        except gspread.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
+            worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
+        
+        # 3. 準備資料
+        tw_fix = timedelta(hours=8)
+        start_t = st.session_state.get('start_time', datetime.now())
+        login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+        end_t = datetime.now()
+        logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S") # 視為最後更新時間
+        duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
+        
+        # 4. 整理對話內容
+        context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
+        full_conversation = f"【設定參數】：{context_info}\n\n"
+        for msg in chat_history:
+            role = msg.get("role", "Unknown")
+            content = ""
+            if "parts" in msg:
+                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+            elif "content" in msg:
+                content = msg["content"]
+            full_conversation += f"[{role}]: {content}\n"
 
-            # 2. 連線設定 (包含金鑰格式修復)
-            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-            creds_dict = dict(st.secrets["gcp_service_account"])
+        # 5. 尋找並更新，或新增一筆
+        records = worksheet.get_all_records()
+        row_to_update = None
+        col_logins = worksheet.col_values(1) # 第一欄：登入時間
+        col_ids = worksheet.col_values(3)    # 第三欄：學員編號
+        
+        for i in range(1, len(col_logins)): # 跳過標題列
+            if i < len(col_ids) and col_logins[i] == login_str and str(col_ids[i]) == str(user_id):
+                row_to_update = i + 1 # Gspread 索引從 1 開始
+                break
+                
+        # 計算累積次數
+        login_count = col_ids.count(str(user_id))
+        if row_to_update is None:
+            login_count += 1 # 新增一筆
             
-            # 修正 private_key 的換行符號問題
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            client = gspread.authorize(creds)
+        data_row = [login_str, logout_str, user_id, duration_mins, login_count, full_conversation]
+        
+        if row_to_update:
+            # 更新既有列 (A:F)
+            cell_range = f'A{row_to_update}:F{row_to_update}'
+            worksheet.update(cell_range, [data_row])
+        else:
+            # 新增一列
+            worksheet.append_row(data_row)
             
-            # 3. 開啟試算表
-            # 請務必確認這裡的檔名與 Google Drive 上的一模一樣 (研習 vs 研究)
-            target_sheet_name = "2025創傷知情研習數據" 
-            try:
-                sheet = client.open(target_sheet_name)
-            except gspread.SpreadsheetNotFound:
-                st.error(f"❌ 錯誤：找不到名為「{target_sheet_name}」的試算表。請確認 Google Drive 上的檔名完全一致。")
-                return False
+        return True
+    except Exception as e:
+        print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
+        return False
 
-            # 4. 取得或自動建立 'Coach' 分頁
-            try:
-                worksheet = sheet.worksheet("Coach")
-            except gspread.WorksheetNotFound:
-                worksheet = sheet.add_worksheet(title="Coach", rows="1000", cols="10")
-                worksheet.append_row(["登入時間", "登出時間", "學員編號", "使用分鐘數", "累積使用次數", "完整對話紀錄"])
-            
-            # 5. 時間計算 (校正為台灣時間 UTC+8)
-            tw_fix = timedelta(hours=8)
-            start_t = st.session_state.get('start_time', datetime.now())
-            login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-            end_t = datetime.now()
-            logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-            duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
-            
-            # 6. 計算累積次數
-            try:
-                all_ids = worksheet.col_values(3) 
-                login_count = all_ids.count(user_id) + 1
-            except:
-                login_count = 1
-
-            # 7. 整理對話內容
-            context_info = f"諮詢對象年級: {grade} / 使用語言: {lang}"
-            full_conversation = f"【設定參數】：{context_info}\n\n"
-            for msg in chat_history:
-                role = msg.get("role", "Unknown")
-                content = ""
-                if "parts" in msg:
-                    content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
-                elif "content" in msg:
-                    content = msg["content"]
-                full_conversation += f"[{role}]: {content}\n"
-
-            # 8. 寫入資料
-            worksheet.append_row([
-                login_str, 
-                logout_str, 
-                user_id, 
-                duration_mins, 
-                login_count, 
-                full_conversation
-            ])
-            
-            # 如果成功執行到這裡，回傳 True
-            return True
-
-        except Exception as e:
-            # 如果發生錯誤 (例如 API 塞車)
-            if attempt < max_retries - 1:
-                time.sleep(delay) # 等待
-                delay *= 2        # 等待時間加倍，避開尖峰
-                continue          # 重試
-            else:
-                # 如果重試了 3 次還是失敗
-                st.error(f"❌ 上傳失敗 (已重試{max_retries}次)，請檢查網路或稍後再試。\n錯誤訊息: {str(e)}")
-                return False
+# --- 防呆防超速發送函式 ---
+def send_message_safely(chat_session, text):
+    """帶有強制延遲與錯誤處理的發送機制"""
+    # [防呆 1] 強制減速：每次發話前強制等 2 秒，避免老師按太快
+    time.sleep(2) 
+    
+    try:
+        response = chat_session.send_message(text)
+        return response.text
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "429" in error_msg or "quota" in error_msg:
+            # [防呆 2] 友善的超速提醒
+            st.warning("🐌 哎呀！您輸入的速度太快了，AI 教練還在思考中。請稍等 10 秒鐘後再試一次喔！(免費版速度限制)")
+            return None
+        else:
+            raise e # 其他嚴重錯誤照常拋出
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
 if "loaded_text" not in st.session_state: st.session_state.loaded_text = ""
 if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
+# 確保 API Key 被安全記憶
+if "api_key" not in st.session_state: st.session_state.api_key = ""
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -139,9 +135,10 @@ if not st.session_state.user_nickname:
 
 # --- 3. 側邊欄設定 ---
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
-
-# --- 新增功能：下載個人紀錄區 (放在上傳按鈕之前) ---
+st.sidebar.markdown("*(系統已開啟自動存檔功能)*")
 st.sidebar.markdown("---")
+
+# 下載個人紀錄區
 if st.session_state.history:
     st.sidebar.subheader("💾 個人備份")
     # 準備下載用的資料表
@@ -163,49 +160,23 @@ if st.session_state.history:
     )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📤 結束諮詢")
-
-# 上傳並登出按鈕
-if st.sidebar.button("上傳紀錄並登出"):
-    if not st.session_state.history:
-        st.sidebar.warning("還沒有對話紀錄喔！")
-    else:
-        with st.spinner("正在連線至 Google 試算表..."):
-            current_grade = st.session_state.get("current_grade", "未設定")
-            current_lang = st.session_state.get("current_lang", "未設定")
-            
-            upload_success = save_to_google_sheets(st.session_state.user_nickname, st.session_state.history, current_grade, current_lang)
-            
-            if upload_success:
-                st.sidebar.success("✅ 上傳成功！")
-                time.sleep(1) 
-                keys_to_clear = ["user_nickname", "history", "start_time", "chat_session"]
-                for key in keys_to_clear:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.session_state.logout_triggered = True
-                st.rerun()
-            else:
-                st.sidebar.error("⚠️ 上傳失敗，請檢查上方錯誤訊息。")
-                if st.sidebar.button("⚠️ 忽略錯誤，強制登出"):
-                    st.session_state.logout_triggered = True
-                    st.session_state.clear()
-                    st.rerun()
-
-# API Key 與設定
-st.sidebar.markdown("---")
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key")
-api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
-if not api_key:
+# 利用 value 綁定 session_state，讓系統記住 API Key
+input_key = st.sidebar.text_input("在此貼上您的 API Key", type="password", value=st.session_state.api_key)
+
+if input_key:
+    st.session_state.api_key = input_key
+
+if not st.session_state.api_key:
     st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
     st.stop() 
 
 # 自動偵測模型
 valid_model_name = None
-if api_key:
+if st.session_state.api_key:
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=st.session_state.api_key)
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
             valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
@@ -239,7 +210,7 @@ if not st.session_state.loaded_text:
 # --- 5. 教練對話邏輯 (Mollick Coach Prompt) ---
 st.title("💬 實作策略諮詢區")
 
-if st.session_state.loaded_text and api_key and valid_model_name:
+if st.session_state.loaded_text and st.session_state.api_key and valid_model_name:
     model = genai.GenerativeModel(
         model_name=valid_model_name,
         safety_settings={
@@ -283,9 +254,23 @@ if st.session_state.loaded_text and api_key and valid_model_name:
 
     if user_in := st.chat_input("描述您的挑戰（例如：學生突然大叫、拒絕合作...）"):
         st.session_state.history.append({"role": "user", "content": user_in})
-        try:
-            resp = st.session_state.chat_session.send_message(user_in)
-            st.session_state.history.append({"role": "assistant", "content": resp.text})
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ 發生錯誤: {e}")
+        with st.chat_message("user"):
+            st.write(user_in)
+            
+        with st.spinner("⏳ 教練正在整理思緒 (為防超速，請稍候)..."):
+            try:
+                # 使用安全發送函式 (內建延遲與防呆)
+                resp_text = send_message_safely(st.session_state.chat_session, user_in)
+                
+                if resp_text: # 如果沒被限速擋下
+                    st.session_state.history.append({"role": "assistant", "content": resp_text})
+                    # 【背景自動存檔】
+                    auto_save_to_google_sheets(
+                        st.session_state.user_nickname, 
+                        st.session_state.history, 
+                        st.session_state.current_grade, 
+                        st.session_state.current_lang
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.error(f"❌ 發生錯誤: {e}")
