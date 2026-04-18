@@ -92,16 +92,21 @@ def auto_save_to_google_sheets(user_id, chat_history, grade, lang):
         print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
         return False
 
-# --- API 輪替與防呆發送機制 (Fallback Mechanism) ---
+# --- API 輪替與防呆發送機制 (角色強化版) ---
 def send_message_safely(text):
     """
-    發送訊息，若失敗則自動切換至下一把 API Key 重試
+    發送訊息，若失敗則自動切換至下一把 API Key 重試。
+    加入 system_instruction 防護機制，確保切換 Key 時教練角色絕不混亂。
     """
     time.sleep(1) # [防呆] 強制減速 1 秒
     
-    # 取得目前的對話歷史
+    # --- 關鍵防護：抽離 System Prompt 以鎖定角色 ---
+    # history 的第一筆 [0] 永遠是教練的角色設定 (sys_prompt)
+    system_prompt = st.session_state.history[0]["content"]
+    
+    # 取得除了第一筆 (sys_prompt) 之外的對話歷史
     gemini_history = []
-    for msg in st.session_state.history:
+    for msg in st.session_state.history[1:]:
         g_role = "model" if msg["role"] == "assistant" else "user"
         gemini_history.append({"role": g_role, "parts": [msg["content"]]})
         
@@ -116,8 +121,11 @@ def send_message_safely(text):
         try:
             # 使用當前的 Key 初始化模型
             genai.configure(api_key=active_key)
+            
+            # 將教練的人設綁死在系統底層
             model = genai.GenerativeModel(
                 model_name=st.session_state.valid_model_name,
+                system_instruction=system_prompt, # <--- 鎖定教練角色的防護！
                 safety_settings={
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -126,7 +134,7 @@ def send_message_safely(text):
                 }
             )
             
-            # 使用目前的歷史紀錄建立 session
+            # 使用純淨的歷史紀錄建立 session
             chat_session = model.start_chat(history=gemini_history)
             response = chat_session.send_message(text)
             
@@ -140,7 +148,7 @@ def send_message_safely(text):
             
             if i == total_keys - 1:
                 if "429" in error_msg or "quota" in error_msg:
-                    st.warning("🐌 哎呀！您輸入的速度太快，或是目前所有 API 額度都耗盡了。請稍等 1 分鐘後再試喔！")
+                    st.warning("🐌 您輸入的速度太快，或是目前所有 API 額度都耗盡了。請稍等 1 分鐘後再試喔！")
                     return None
                 else:
                     raise e
@@ -156,7 +164,7 @@ if "chat_session_initialized" not in st.session_state: st.session_state.chat_ses
 if "raw_api_key_input" not in st.session_state: st.session_state.raw_api_key_input = ""
 if "api_keys_list" not in st.session_state: st.session_state.api_keys_list = []
 if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
-if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-1.5-pro-latest"
+if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-2.5-flash" # 預設改為 2.5-flash
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -228,9 +236,11 @@ if st.session_state.api_keys_list:
         genai.configure(api_key=st.session_state.api_keys_list[0])
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
-            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
+            # 優先搜尋 gemini-2.5-flash 作為預設
+            default_idx = available_models.index("models/gemini-2.5-flash") if "models/gemini-2.5-flash" in available_models else 0
+            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models, index=default_idx)
     except: 
-        st.sidebar.error("❌ 第一把 API Key 無效，請檢查。")
+        st.sidebar.error("❌ API Key 無效，請檢查。")
 
 # 選項設定
 student_grade = st.sidebar.selectbox("🎯 諮詢對象年級", ["國小", "國中", "高中"])
@@ -253,6 +263,7 @@ if not st.session_state.loaded_text:
                         text = page.extract_text()
                         if text: combined_text += text + "\n"
                 st.session_state.loaded_text = combined_text
+                st.toast(f"✅ 已載入 {len(pdf_files)} 份教材")
             except Exception as e:
                 st.error(f"教材讀取失敗: {e}")
     else:
